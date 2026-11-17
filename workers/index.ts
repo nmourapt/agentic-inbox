@@ -360,13 +360,42 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 	if (allowedAddresses.length > 0) {
 		mailboxId = allRecipients.find((addr) => allowedAddresses.includes(addr));
 		if (!mailboxId) { console.log(`Ignoring email: no recipient matches EMAIL_ADDRESSES.`); return; }
-	} else { mailboxId = allRecipients[0]; }
+	} else {
+		// Prefer a recipient that has an existing mailbox, so mail addressed to
+		// both a real mailbox and an unassigned address still lands correctly.
+		for (const addr of allRecipients) {
+			if (await env.BUCKET.head(`mailboxes/${addr}.json`)) { mailboxId = addr; break; }
+		}
+		mailboxId ??= allRecipients[0];
+	}
 	if (!mailboxId) throw new Error("received email with no valid recipient address");
 
 	const messageId = crypto.randomUUID();
-	if (!(await env.BUCKET.head(`mailboxes/${mailboxId}.json`))) { console.log(`Ignoring email for ${mailboxId}: mailbox does not exist`); return; }
 
-	const stub = env.MAILBOX.get(env.MAILBOX.idFromName(mailboxId));
+	// Catch-all support: if no mailbox exists for this recipient, fall back to
+	// CATCH_ALL_MAILBOX and file the message into a dedicated folder instead
+	// of silently dropping it.
+	let targetMailbox = mailboxId;
+	let folder = Folders.INBOX;
+	let assigned = true;
+	if (!(await env.BUCKET.head(`mailboxes/${targetMailbox}.json`))) {
+		const fallback = ((env.CATCH_ALL_MAILBOX ?? "") as string).toLowerCase();
+		if (!fallback || !(await env.BUCKET.head(`mailboxes/${fallback}.json`))) {
+			console.log(`Ignoring email for ${mailboxId}: mailbox does not exist`);
+			return;
+		}
+		console.log(`No mailbox for ${mailboxId}; filing into ${fallback} (unassigned)`);
+		assigned = false;
+		targetMailbox = fallback;
+		folder = (env.UNASSIGNED_FOLDER as string) || "unassigned";
+	}
+
+	const stub = env.MAILBOX.get(env.MAILBOX.idFromName(targetMailbox));
+
+	if (!assigned) {
+		// No-op if the folder already exists (UNIQUE constraint → null).
+		await (stub as any).createFolder(folder, "Unassigned");
+	}
 
 	const attachmentData: StoredAttachment[] = [];
 	if (parsedEmail.attachments) {
@@ -392,7 +421,7 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 
 	const originalMessageId = parsedEmail.messageId ? extractMsgId(parsedEmail.messageId) : null;
 
-	await stub.createEmail(Folders.INBOX, {
+	await stub.createEmail(folder, {
 		id: messageId, subject: parsedEmail.subject || "",
 		sender: (parsedEmail.from?.address || "").toLowerCase(), recipient: allRecipients.join(", "),
 		cc: ccRecipients.join(", ") || null, bcc: bccRecipients.join(", ") || null,
@@ -402,11 +431,15 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 		thread_id: threadId, message_id: originalMessageId, raw_headers: JSON.stringify(parsedEmail.headers),
 	}, attachmentData);
 
-	const agentStub = env.EMAIL_AGENT.get(env.EMAIL_AGENT.idFromName(mailboxId));
-	ctx.waitUntil(agentStub.fetch(new Request("https://agents/onNewEmail", {
-		method: "POST", headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ mailboxId, emailId: messageId, sender: (parsedEmail.from?.address || "").toLowerCase(), subject: parsedEmail.subject || "", threadId }),
-	})).catch((e) => console.error("Auto-draft trigger failed:", (e as Error).message)));
+	if (assigned) {
+		// Skip the auto-draft agent for unassigned (catch-all) mail — usually
+		// spam or one-off addresses, not worth Workers AI usage.
+		const agentStub = env.EMAIL_AGENT.get(env.EMAIL_AGENT.idFromName(targetMailbox));
+		ctx.waitUntil(agentStub.fetch(new Request("https://agents/onNewEmail", {
+			method: "POST", headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ mailboxId: targetMailbox, emailId: messageId, sender: (parsedEmail.from?.address || "").toLowerCase(), subject: parsedEmail.subject || "", threadId }),
+		})).catch((e) => console.error("Auto-draft trigger failed:", (e as Error).message)));
+	}
 }
 
 export { app, receiveEmail };

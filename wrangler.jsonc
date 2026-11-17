@@ -13,9 +13,19 @@
 		// Production deploys must also define POLICY_AUD and TEAM_DOMAIN.
 		// TEAM_DOMAIN may be the base Access URL or the full /cdn-cgi/access/certs URL.
 		// The worker now fails closed outside local development if Access is not configured.
-		"DOMAINS": "example.com",
-		"EMAIL_ADDRESSES": []
+		"DOMAINS": "nmoura.pt",
+		"EMAIL_ADDRESSES": [],
+		// Inbound mail for addresses with no mailbox is filed into this mailbox…
+		"CATCH_ALL_MAILBOX": "nuno@nmoura.pt",
+		// …under this folder (instead of being silently dropped).
+		"UNASSIGNED_FOLDER": "unassigned"
 	},
+	"routes": [
+		{
+			"pattern": "mail.nmoura.pt",
+			"custom_domain": true
+		}
+	],
 	"send_email": [
 		{
 			"name": "EMAIL",
