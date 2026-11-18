@@ -17,6 +17,16 @@ import {
 } from "./lib/email-helpers";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
+import {
+	type AliasRecord,
+	aliasKey,
+	aliasFolder,
+	extractWebsite,
+	findAliasRecord,
+	folderSlug,
+	generateAliasLocalPart,
+	tokensMatch,
+} from "./lib/aliases";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
 import { requireMailbox, type MailboxContext } from "./lib/mailbox";
@@ -42,12 +52,16 @@ const DraftBody = z.object({
 	draft_id: z.string().optional(),
 });
 
+// Body sent by Bitwarden's addy.io-compatible forwarded-alias generator.
+const AliasCreateBody = z.object({
+	domain: z.string().optional(),
+	description: z.string().optional(),
+});
+
 // -- Helpers --------------------------------------------------------
 
 function slugify(text: string) { // can return "" for non-alphanumeric input
-	return text.toString().toLowerCase()
-		.replace(/\s+/g, "-").replace(/[^\w-]+/g, "")
-		.replace(/--+/g, "-").replace(/^-+/, "").replace(/-+$/, "");
+	return folderSlug(text);
 }
 
 function intQuery(c: AppContext, key: string): number | undefined {
@@ -67,7 +81,7 @@ function boolQuery(c: AppContext, key: string): boolean | undefined {
 
 const app = new Hono<MailboxContext>();
 app.use("/api/*", cors({
-	origin: (origin) => {
+	origin: (origin, c) => {
 		// Same-origin requests have no Origin header — allow them.
 		if (!origin) return origin;
 		// In development, allow localhost for Vite dev server.
@@ -75,10 +89,13 @@ app.use("/api/*", cors({
 			const url = new URL(origin);
 			if (url.hostname === "localhost" || url.hostname === "127.0.0.1") return origin;
 		} catch { /* invalid origin */ }
-		// Block all other cross-origin requests. The app is served from the
-		// same origin as the API, so legitimate browser requests never send
-		// an Origin header. Returning undefined omits Access-Control-Allow-Origin.
-		return undefined;
+		// Explicitly allowed cross-origin callers: password-manager clients
+		// (e.g. the Vaultwarden web vault / extension) calling the addy.io-
+		// compatible alias endpoint. Everything else is blocked. The API still
+		// enforces Access auth for all endpoints except the alias endpoint.
+		const allowed = (c.env.ALIAS_ALLOWED_ORIGINS || "").split(",")
+			.map((o) => o.trim().toLowerCase()).filter(Boolean);
+		return allowed.includes(origin.toLowerCase()) ? origin : undefined;
 	},
 }));
 app.use("/api/v1/mailboxes/:mailboxId/*", requireMailbox);
@@ -90,6 +107,78 @@ app.get("/api/v1/config", (c) => {
 	const domains = domainsRaw.split(",").map((d) => d.trim()).filter(Boolean);
 	const emailAddresses = c.env.EMAIL_ADDRESSES ?? [];
 	return c.json({ domains, emailAddresses });
+});
+
+// -- Alias generation (addy.io-compatible, for Bitwarden) -------------
+//
+// Bitwarden's "forwarded email alias" generator supports addy.io with a
+// self-hosted server URL. It calls POST {url}/api/v1/aliases with a Bearer
+// token and expects an addy.io-shaped response: { data: { email } }.
+// This endpoint is exempt from Cloudflare Access (see workers/app.ts) —
+// password-manager clients cannot authenticate via Access — and
+// authenticates with the ALIAS_API_TOKEN secret instead. Aliases are
+// registered in R2 so inbound mail can be filed per site (see receiveEmail).
+
+app.get("/api/v1/aliases", async (c) => {
+	const records: AliasRecord[] = [];
+	let cursor: string | undefined;
+	do {
+		const listed = await c.env.BUCKET.list({ prefix: "aliases/", cursor });
+		for (const obj of listed.objects) {
+			const body = await c.env.BUCKET.get(obj.key);
+			if (body) records.push((await body.json()) as AliasRecord);
+		}
+		cursor = listed.truncated ? listed.cursor : undefined;
+	} while (cursor);
+	records.sort((a, b) => (a.created < b.created ? 1 : -1));
+	return c.json({ aliases: records });
+});
+
+app.post("/api/v1/aliases", async (c) => {
+	const expected = (c.env.ALIAS_API_TOKEN ?? "").trim();
+	if (!expected) {
+		return c.json({ error: "Alias generation is not configured (set ALIAS_API_TOKEN)" }, 503);
+	}
+	const auth = c.req.header("Authorization") ?? "";
+	const supplied = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+	if (!supplied || !tokensMatch(supplied, expected)) {
+		return c.json({ error: "Unauthorized" }, 401);
+	}
+
+	const { domain: requestedDomain, description } = AliasCreateBody.parse(
+		await c.req.json().catch(() => ({})),
+	);
+
+	// Only allow aliases on configured domains; anything else the client
+	// sends (e.g. addy.io's default "anonaddy.me") is ignored.
+	const domains = (c.env.DOMAINS || "").split(",").map((d) => d.trim()).filter(Boolean);
+	const domain = requestedDomain && domains.includes(requestedDomain) ? requestedDomain : domains[0];
+	if (!domain) return c.json({ error: "No alias domain configured (DOMAINS)" }, 500);
+
+	const website = description ? extractWebsite(description) : null;
+
+	// Draw local parts until we find one that is not taken. R2 is the
+	// source of truth for existing aliases.
+	let localPart = "";
+	let alias = "";
+	for (let attempt = 0; attempt < 8; attempt++) {
+		localPart = generateAliasLocalPart();
+		alias = `${localPart}@${domain}`;
+		if (!(await c.env.BUCKET.head(aliasKey(alias)))) break;
+	}
+
+	const record: AliasRecord = {
+		alias,
+		local_part: localPart,
+		domain,
+		description: description ?? null,
+		website,
+		created: new Date().toISOString(),
+	};
+	await c.env.BUCKET.put(aliasKey(alias), JSON.stringify(record));
+
+	// addy.io response shape — Bitwarden reads data.email.
+	return c.json({ data: { email: alias, local_part: localPart, domain, active: true } }, 201);
 });
 
 // -- Mailboxes ------------------------------------------------------
@@ -374,9 +463,13 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 
 	// Catch-all support: if no mailbox exists for this recipient, fall back to
 	// CATCH_ALL_MAILBOX and file the message into a dedicated folder instead
-	// of silently dropping it.
+	// of silently dropping it. Mail for a *registered* alias (generated via
+	// the addy.io-compatible endpoint) goes into a folder named after the
+	// site the alias was created for; everything else lands in the generic
+	// unassigned folder.
 	let targetMailbox = mailboxId;
-	let folder = Folders.INBOX;
+	let folder: string = Folders.INBOX;
+	let folderName = "";
 	let assigned = true;
 	if (!(await env.BUCKET.head(`mailboxes/${targetMailbox}.json`))) {
 		const fallback = ((env.CATCH_ALL_MAILBOX ?? "") as string).toLowerCase();
@@ -384,17 +477,27 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 			console.log(`Ignoring email for ${mailboxId}: mailbox does not exist`);
 			return;
 		}
-		console.log(`No mailbox for ${mailboxId}; filing into ${fallback} (unassigned)`);
 		assigned = false;
 		targetMailbox = fallback;
-		folder = (env.UNASSIGNED_FOLDER as string) || "unassigned";
+
+		const aliasRecord = await findAliasRecord(env.BUCKET, allRecipients);
+		if (aliasRecord) {
+			const f = aliasFolder(aliasRecord);
+			folder = f.id;
+			folderName = f.name;
+			console.log(`Alias mail for ${aliasRecord.alias} → folder "${f.name}" in ${fallback}`);
+		} else {
+			folder = (env.UNASSIGNED_FOLDER as string) || "unassigned";
+			folderName = "Unassigned";
+			console.log(`No mailbox for ${mailboxId}; filing into ${fallback} (unassigned)`);
+		}
 	}
 
 	const stub = env.MAILBOX.get(env.MAILBOX.idFromName(targetMailbox));
 
 	if (!assigned) {
 		// No-op if the folder already exists (UNIQUE constraint → null).
-		await (stub as any).createFolder(folder, "Unassigned");
+		await (stub as any).createFolder(folder, folderName);
 	}
 
 	const attachmentData: StoredAttachment[] = [];

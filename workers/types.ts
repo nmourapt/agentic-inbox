@@ -5,4 +5,6 @@
 export interface Env extends Cloudflare.Env {
 	POLICY_AUD: string;
 	TEAM_DOMAIN: string;
+	/** Bearer token for the addy.io-compatible alias endpoint (Bitwarden). */
+	ALIAS_API_TOKEN?: string;
 }

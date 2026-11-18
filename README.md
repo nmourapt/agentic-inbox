@@ -30,6 +30,34 @@ Upstream behavior: inbound mail for an address that has no mailbox is **silently
 
 - **Deploy target** — `wrangler.jsonc` is pointed at a custom domain route (`mail.example.com` in place of the placeholder) with `DOMAINS` matching.
 
+## This fork: alias generation for Bitwarden
+
+Bitwarden's username generator ("Forwarded email alias" → **Addy.io** → self-hosted server URL) can generate aliases **directly against this app**, and the catch-all delivers their mail. Because the alias is registered in the app when it is generated, inbound mail for a registered alias is filed into a **folder named after the site it was created for** (e.g. `github.com`) instead of the generic `unassigned` folder — the address itself stays fully random (`quiet-otter-482@example.com`).
+
+### What was added
+
+- **`POST /api/v1/aliases`** — addy.io-compatible endpoint (the exact shape Bitwarden's Addy.io forwarder speaks: Bearer token, `{domain, description}` in, `{data: {email}}` out). Registers the alias in R2 (`aliases/{address}.json`) with the site extracted from the description.
+- **`GET /api/v1/aliases`** — lists registered aliases (normal Cloudflare Access auth).
+- **Per-site filing** — inbound mail for a registered alias is delivered to `CATCH_ALL_MAILBOX` in an auto-created folder named after the alias's site (or the alias local part when no site is known). Unregistered catch-all mail still goes to `UNASSIGNED_FOLDER`.
+- **Access exemption** — `POST`/`OPTIONS` on `/api/v1/aliases` skips Access JWT validation in the Worker and must be exempted at the edge with a path-scoped Access bypass app; the endpoint authenticates with the `ALIAS_API_TOKEN` secret instead.
+
+### Config
+
+| Variable | Type | Purpose | Example |
+|---|---|---|---|
+| `ALIAS_API_TOKEN` | secret | Bearer token the alias endpoint requires. | any long random string |
+| `ALIAS_ALLOWED_ORIGINS` | var | Comma-separated origins allowed by CORS on the API (for the Vaultwarden web vault / browser extension calling the endpoint). Empty keeps the API same-origin only. | `https://warden.example.com` |
+
+### Bitwarden setup
+
+1. Set the secret: `npx wrangler secret put ALIAS_API_TOKEN` (any long random string).
+2. Exempt the endpoint at the edge: create a Cloudflare Access application scoped to `mail.example.com/api/v1/aliases` with a *Bypass — Everyone* policy (path-scoped apps take precedence over the hostname-wide app).
+3. In Bitwarden: Generator → Username → Forwarded email alias → Service: **Addy.io**
+   - **API Access Token**: the `ALIAS_API_TOKEN` value
+   - **Self-host server URL**: `https://mail.example.com`
+   - **Email domain**: your catch-all domain (only domains in `DOMAINS` are honored; anything else is ignored)
+4. Vaultwarden users must also set `ALLOWED_CONNECT_SRC=https://mail.example.com` so the web vault / browser extension CSP permits the call.
+
 ## How to setup
 
 **Important**: Clicking the 'Deploy to Cloudflare' button is only one part of the setup. You must follow the **After deploying** steps as well. For a full step-by-step guide with screenshots, refer to this comment: 

@@ -18,7 +18,10 @@
 		// Inbound mail for addresses with no mailbox is filed into this mailbox…
 		"CATCH_ALL_MAILBOX": "nuno@nmoura.pt",
 		// …under this folder (instead of being silently dropped).
-		"UNASSIGNED_FOLDER": "unassigned"
+		"UNASSIGNED_FOLDER": "unassigned",
+		// Origins allowed to call the addy.io-compatible alias endpoint from a
+		// browser (Vaultwarden web vault / extension). Comma-separated.
+		"ALIAS_ALLOWED_ORIGINS": "https://warden.nmoura.pt"
 	},
 	"routes": [
 		{

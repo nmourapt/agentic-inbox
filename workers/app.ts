@@ -49,6 +49,19 @@ app.use("*", async (c, next) => {
 		return next();
 	}
 
+	// The addy.io-compatible alias endpoint (POST /api/v1/aliases) is called
+	// by password-manager clients (Bitwarden), which cannot authenticate via
+	// Access. It is exempted at the edge (path-scoped Access bypass app) and
+	// here, and authenticates with the ALIAS_API_TOKEN bearer secret instead.
+	// Its CORS preflight (OPTIONS) is exempt too. The GET listing endpoint
+	// is NOT exempt and still requires an Access session.
+	if (
+		(c.req.method === "POST" || c.req.method === "OPTIONS") &&
+		c.req.path === "/api/v1/aliases"
+	) {
+		return next();
+	}
+
 	const { POLICY_AUD, TEAM_DOMAIN } = c.env;
 
 	// Fail closed in production if Access is not configured.
