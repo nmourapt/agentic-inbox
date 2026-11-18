@@ -119,7 +119,12 @@ app.get("/api/v1/config", (c) => {
 // authenticates with the ALIAS_API_TOKEN secret instead. Aliases are
 // registered in R2 so inbound mail can be filed per site (see receiveEmail).
 
-app.get("/api/v1/aliases", async (c) => {
+app.get("/api/v1/registered-aliases", async (c) => {
+	// NOTE: deliberately NOT under /api/v1/aliases — that path is exempt
+	// from Access (path-scoped bypass app for Bitwarden's POST), and the
+	// edge therefore never issues a JWT for it, which would make any
+	// Access-protected GET there unreachable. This listing endpoint sits
+	// on a normal, Access-protected path instead.
 	const records: AliasRecord[] = [];
 	let cursor: string | undefined;
 	do {

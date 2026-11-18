@@ -37,7 +37,7 @@ Bitwarden's username generator ("Forwarded email alias" → **Addy.io** → self
 ### What was added
 
 - **`POST /api/v1/aliases`** — addy.io-compatible endpoint (the exact shape Bitwarden's Addy.io forwarder speaks: Bearer token, `{domain, description}` in, `{data: {email}}` out). Registers the alias in R2 (`aliases/{address}.json`) with the site extracted from the description.
-- **`GET /api/v1/aliases`** — lists registered aliases (normal Cloudflare Access auth).
+- **`GET /api/v1/registered-aliases`** — lists registered aliases (normal Cloudflare Access auth; deliberately *not* under `/api/v1/aliases`, since that path is Access-bypassed for all methods and a JWT-protected GET there would be unreachable).
 - **Per-site filing** — inbound mail for a registered alias is delivered to `CATCH_ALL_MAILBOX` in an auto-created folder named after the alias's site (or the alias local part when no site is known). Unregistered catch-all mail still goes to `UNASSIGNED_FOLDER`.
 - **Access exemption** — `POST`/`OPTIONS` on `/api/v1/aliases` skips Access JWT validation in the Worker and must be exempted at the edge with a path-scoped Access bypass app; the endpoint authenticates with the `ALIAS_API_TOKEN` secret instead.
 
