@@ -12,6 +12,24 @@ An **AI-powered Email Agent** can read your inbox, search conversations, and dra
 
 Read the blog post to learn more about Cloudflare Email Service and how to use it with the Agents SDK, MCP, and from the Wrangler CLI: [Email for Agents](https://blog.cloudflare.com/email-for-agents/).
 
+## This fork: catch-all mailbox support
+
+Upstream behavior: inbound mail for an address that has no mailbox is **silently dropped**. This fork files it into a fallback mailbox instead.
+
+### What changed
+
+- **Catch-all fallback** — mail addressed to an unassigned address (e.g. `anything@example.com`) is delivered to the mailbox configured in `CATCH_ALL_MAILBOX`, under a dedicated folder (`UNASSIGNED_FOLDER`, default: `unassigned`) instead of being dropped. The original recipient is preserved in the email's recipient field.
+- **Smarter recipient resolution** — when several recipients are on the `To` header, an existing mailbox is preferred over the fallback, so mail addressed to both a real mailbox and an unassigned address lands in the real mailbox.
+- **No auto-draft on unassigned mail** — the AI auto-draft agent only runs for mail that landed in a real mailbox's inbox, avoiding Workers AI spend on likely spam.
+- **Config** — the changes are controlled by two `vars` in `wrangler.jsonc`:
+
+  | Variable | Purpose | Example |
+  |---|---|---|
+  | `CATCH_ALL_MAILBOX` | Mailbox that receives mail for unassigned addresses. Empty disables the feature (mail is dropped, like upstream). | `nuno@example.com` |
+  | `UNASSIGNED_FOLDER` | Folder in the fallback mailbox where unassigned mail is filed. | `unassigned` |
+
+- **Deploy target** — `wrangler.jsonc` is pointed at a custom domain route (`mail.example.com` in place of the placeholder) with `DOMAINS` matching.
+
 ## How to setup
 
 **Important**: Clicking the 'Deploy to Cloudflare' button is only one part of the setup. You must follow the **After deploying** steps as well. For a full step-by-step guide with screenshots, refer to this comment: 
